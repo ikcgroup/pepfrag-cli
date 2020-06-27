@@ -2,9 +2,10 @@ import argparse
 import collections
 import re
 import sys
-from typing import Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import pepfrag
+import unimoddb
 
 
 class StoreIonTypeDict(argparse.Action):
@@ -27,15 +28,16 @@ class StoreIonTypeDict(argparse.Action):
             return
 
         for val in values:
-            split_val = val.split(',')
+            split_val = val.split('=')
             if len(split_val) == 2:
-                d[field].append(tuple(split_val))
+                d[field].append((split_val[0], float(split_val[1])))
             elif len(split_val) == 1:
                 d[field].append(val)
-            # TODO: invalid format
+            else:
+                raise ValueError(f'Invalid neutral loss format: {val}')
 
 
-def parse_args():
+def parse_args(args: List[str]) -> argparse.Namespace:
     """
     Parses the command line arguments.
 
@@ -51,6 +53,10 @@ def parse_args():
         help='Charge state of the peptide'
     )
     parser.add_argument(
+        '--cterm',
+        help='C-terminal modification'
+    )
+    parser.add_argument(
         '-r',
         '--radical',
         action='store_true'
@@ -62,18 +68,43 @@ def parse_args():
             dest='ion_types',
             action=StoreIonTypeDict
         )
-    return parser.parse_args()
+    return parser.parse_args(args)
 
 
 MOD_PATTERN = re.compile(r'\[(\w+)\]')
 
 
-def parse_sequence(seq: str) -> Tuple[str, Tuple[pepfrag.ModSite, ...]]:
-    print(MOD_PATTERN.findall(seq))
-    return seq, tuple()
+def parse_sequence(
+        seq_mods: str,
+        ptmdb: unimoddb.UnimodDB
+) -> Tuple[str, List[pepfrag.ModSite]]:
+    """
+    Parses the peptide sequence to extract embedded modifications.
+
+    """
+    mods: List[pepfrag.ModSite] = []
+    seq = ''
+    offset = 0
+    for mod in MOD_PATTERN.finditer(seq_mods):
+        mod_name = mod.group(1)
+        start = mod.start()
+        site = 'nterm' if offset == 0 else len(seq) + start - offset
+        mods.append(pepfrag.ModSite(ptmdb.get_mass(mod_name), site, mod_name))
+        seq += seq_mods[offset:start]
+        offset = mod.end()
+
+    seq += seq_mods[offset:]
+
+    return seq, mods
 
 
-def construct_peptide(args: argparse.Namespace) -> pepfrag.Peptide:
+def construct_peptide(
+        seq_mods: str,
+        cterm_mod: Optional[str],
+        charge: int,
+        radical: bool,
+        ptmdb: unimoddb.UnimodDB
+) -> pepfrag.Peptide:
     """
     Constructs a `Peptide` instance from the passed command line arguments.
 
@@ -81,16 +112,34 @@ def construct_peptide(args: argparse.Namespace) -> pepfrag.Peptide:
         Peptide.
 
     """
-    seq, mods = parse_sequence(args.sequence)
-    return pepfrag.Peptide(seq, args.charge, mods, radical=args.radical)
+    seq, mods = parse_sequence(seq_mods, ptmdb)
+
+    if cterm_mod:
+        mods.append(
+            pepfrag.ModSite(ptmdb.get_mass(cterm_mod), 'cterm', cterm_mod)
+        )
+
+    return pepfrag.Peptide(seq, charge, mods, radical=radical)
 
 
-def main():
-    args = parse_args()
+def write_fragments(fragments: Sequence):
+    print('Ion: m/z')
+    for fragment in fragments:
+        print(f'{fragment[1]}: {fragment[0]:.6f}')
 
-    print(args)
 
-    peptide = construct_peptide(args)
+def main(args):
+    args = parse_args(args)
+
+    ptmdb = unimoddb.UnimodDB()
+
+    peptide = construct_peptide(
+        args.sequence,
+        args.cterm,
+        args.charge,
+        args.radical,
+        ptmdb
+    )
 
     try:
         fragments = (
@@ -102,8 +151,8 @@ def main():
         print(ex)
         sys.exit(1)
 
-    print(fragments)
+    write_fragments(fragments)
 
 
 if __name__ == '__main__':
-    main()
+    main(sys.argv[1:])
